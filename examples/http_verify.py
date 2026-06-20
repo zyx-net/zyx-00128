@@ -1,18 +1,23 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-真实 HTTP 请求完整链路验证
-- 登记 → 入库 → 借出 → 试废弃(被拒) → 退回 → 废弃 → 按编码/按ID/列表/审计/CSV 查询
-- 然后重启服务再核对
+真实 HTTP 请求完整链路验证（Windows 稳定版）
+- 登记 -> 入库 -> 借出 -> 试废弃(被拒) -> 退回 -> 废弃 -> 多入口查询一致性
+- 自动生成唯一编号，ASCII 安全输出，健壮返回检查
 """
 
-import json
 import sys
+import time
+import json
 import urllib.request
 import urllib.error
 
+if sys.platform == "win32":
+    sys.stdout.reconfigure(encoding="utf-8")
+
 BASE = "http://localhost:5000/api"
-CODE = "REAL-HTTP-VERIFY-001"
+CODE_PREFIX = "REAL-HTTP"
+CODE = "%s-%d" % (CODE_PREFIX, int(time.time() * 1000) % 10000000000)
 
 
 def http(method, path, body=None):
@@ -25,7 +30,10 @@ def http(method, path, body=None):
             raw = r.read()
             return r.status, json.loads(raw.decode("utf-8"))
     except urllib.error.HTTPError as e:
-        return e.code, json.loads(e.read().decode("utf-8"))
+        try:
+            return e.code, json.loads(e.read().decode("utf-8"))
+        except Exception:
+            return e.code, {"success": False, "error": "HTTP_ERROR", "message": str(e)}
 
 
 def header(text):
@@ -45,7 +53,7 @@ def step(step_no, title, expected_status=None, expected_error=None, check_fn=Non
             print("      success:", resp.get("success"))
             if not resp.get("success"):
                 print("      错误码:", resp.get("error"))
-                print("      错误信息:", resp.get("message", "")[:80])
+                print("      错误信息:", str(resp.get("message", ""))[:80])
             if "data" in resp:
                 d = resp["data"]
                 if isinstance(d, dict):
@@ -59,11 +67,16 @@ def step(step_no, title, expected_status=None, expected_error=None, check_fn=Non
             if expected_error:
                 ok = ok and resp.get("error") == expected_error
             if check_fn:
-                ok = ok and check_fn(resp)
+                try:
+                    ok = ok and check_fn(resp)
+                except Exception as e:
+                    print("      检查函数异常: %s" % e)
+                    ok = False
 
-            print("      结果: %s" % ("✓ PASS" if ok else "✗ FAIL"))
+            print("      结果: %s" % ("[OK] PASS" if ok else "[FAIL]"))
             if not ok:
                 print("      !!! 断言失败，终止")
+                print("      完整响应: %s" % json.dumps(resp, ensure_ascii=False)[:800])
                 sys.exit(1)
             return status, resp
         return wrapper
@@ -72,13 +85,13 @@ def step(step_no, title, expected_status=None, expected_error=None, check_fn=Non
 
 def main():
     print()
-    print("╔══════════════════════════════════════════════════════════════════════╗")
-    print("║           真实 HTTP 请求 - 完整链路验证                               ║")
-    print("╚══════════════════════════════════════════════════════════════════════╝")
-    print("  样本编号:", CODE)
-    print("  API 基地址:", BASE)
+    print("=" * 70)
+    print("  真实 HTTP 请求 - 完整链路验证")
+    print("  样本编号: " + CODE)
+    print("  API 基地址: " + BASE)
+    print("=" * 70)
 
-    # ========== 阶段 1：状态机配置确认 ==========
+    # ========== 阶段 0：确认状态机配置 ==========
     header("阶段 0：确认状态机配置已修复")
 
     @step("0.1", "BORROWED 状态只允许 return，不允许 discard", 200)
@@ -90,10 +103,10 @@ def main():
     print("      BORROWED allowed_next:", borrowed_cfg["allowed_next"])
     assert "discard" not in borrowed_cfg["allowed_actions"], "配置仍有问题！"
     assert "return" in borrowed_cfg["allowed_actions"], "配置仍有问题！"
-    print("      ✓ 配置正确")
+    print("      [OK] 配置正确")
 
-    # ========== 阶段 2：完整链路执行 ==========
-    header("阶段 1：登记 → 入库 → 借出")
+    # ========== 阶段 1：登记 -> 入库 -> 借出 ==========
+    header("阶段 1：登记 -> 入库 -> 借出")
 
     @step("1", "登记样本", 201, check_fn=lambda r: r["data"]["status"] == "REGISTERED" and r["data"]["version"] == 1)
     def _():
@@ -129,6 +142,7 @@ def main():
         })
     _, r3 = _()
 
+    # ========== 阶段 2：借出态直接废弃 ==========
     header("阶段 2：借出态直接废弃（必须被拦截！）")
 
     @step("4", "借出态尝试直接废弃 - 预期 INVALID_STATUS_TRANSITION",
@@ -141,8 +155,9 @@ def main():
             "reason": "尝试直接废弃借出样本"
         })
     _, r4 = _()
-    print("      ✓ 借出态废弃已被正确拦截")
+    print("      [OK] 借出态废弃已被正确拦截")
 
+    # ========== 阶段 3：先退回，再废弃 ==========
     header("阶段 3：先退回，再废弃")
 
     @step("5", "退回样本", 200, check_fn=lambda r: r["data"]["status"] == "IN_STORAGE" and r["data"]["version"] == 4)
@@ -158,7 +173,7 @@ def main():
     _, r5 = _()
 
     @step("6", "退回后废弃 - 预期成功", 200,
-          check_fn=lambda r: r["data"]["status"] == "DISCARDED" and r["data"]["version"] == 5 and r["data"]["is_deleted"] is False)
+          check_fn=lambda r: r["data"]["status"] == "DISCARDED" and r["data"]["version"] == 5 and r["data"].get("is_deleted") is False)
     def _():
         return http("POST", "/samples/%d/discard" % sample_id, {
             "operator": "主管老王",
@@ -168,9 +183,10 @@ def main():
             "remark": "按SOP处理"
         })
     _, r6 = _()
-    print("      ✓ 退回后可以正常废弃")
-    print("      ✓ is_deleted=False，不影响查询")
+    print("      [OK] 退回后可以正常废弃")
+    print("      [OK] is_deleted=False，不影响查询")
 
+    # ========== 阶段 4：多入口查询一致性 ==========
     header("阶段 4：废弃后多入口查询一致性")
 
     @step("7.1", "按 ID 查询 - 必须能查到，状态 DISCARDED", 200,
@@ -200,7 +216,7 @@ def main():
     print()
     print("  审计日志完整链路:")
     for l in r_logs["data"]:
-        print("    [%d] %-10s %-12s → %-12s  v%d  %-10s  %s" % (
+        print("    [%d] %-10s %-12s -> %-12s  v%d  %-10s  %s" % (
             l["sequence"], l["action"],
             l.get("from_status", "-"), l.get("to_status", "-"),
             l["version"], l["operator"], l.get("reason", "")
@@ -210,20 +226,26 @@ def main():
     print()
     print("  [7.5] CSV 导出验证")
     req = urllib.request.Request(BASE + "/samples/%d/export-chain?role=LAB_TECHNICIAN" % sample_id)
-    with urllib.request.urlopen(req) as resp:
-        csv_text = resp.read().decode("utf-8-sig")
+    try:
+        with urllib.request.urlopen(req) as resp:
+            csv_text = resp.read().decode("utf-8-sig")
+        csv_status = resp.status
+    except Exception as e:
+        print("      [FAIL] CSV 导出异常: %s" % e)
+        sys.exit(1)
     has_code = CODE in csv_text
     has_discard = "DISCARD" in csv_text
     has_discarded = "DISCARDED" in csv_text or "已废弃" in csv_text
-    print("      HTTP状态码:", resp.status)
+    print("      HTTP状态码:", csv_status)
     print("      包含样本编号:", has_code)
     print("      包含废弃操作:", has_discard)
     print("      包含废弃状态:", has_discarded)
-    csv_ok = has_code and has_discard
-    print("      结果:", "✓ PASS" if csv_ok else "✗ FAIL")
+    csv_ok = has_code and has_discard and csv_status == 200
+    print("      结果:", "[OK] PASS" if csv_ok else "[FAIL]")
     if not csv_ok:
         sys.exit(1)
 
+    # ========== 阶段 5：三方一致性最终核对 ==========
     header("阶段 5：三方一致性最终核对")
 
     id_status = r_id["data"]["status"]
@@ -251,23 +273,23 @@ def main():
               and has_code and has_discard)
 
     if all_ok:
-        print("  ✓ 所有查询入口状态和版本完全一致！")
+        print("  [OK] 所有查询入口状态和版本完全一致！")
     else:
-        print("  ✗ 存在不一致，请检查！")
+        print("  [FAIL] 存在不一致，请检查！")
         sys.exit(1)
 
+    # ========== 阶段 6：用户可见结果总结 ==========
     header("阶段 6：用户可见结果总结")
     print()
-    print("  1. 借出中样本主管直接废弃 → 被接口拒绝 (INVALID_STATUS_TRANSITION)")
-    print("  2. 必须先退回 → 才能正常废弃")
+    print("  1. 借出中样本主管直接废弃 -> 被接口拒绝 (INVALID_STATUS_TRANSITION)")
+    print("  2. 必须先退回 -> 才能正常废弃")
     print("  3. 废弃后按编码/按ID/列表 都能查到，状态为 DISCARDED")
     print("  4. 审计日志完整记录 5 步流程，交接链清晰")
     print("  5. CSV 导出包含完整历史，和查询结果一致")
-    print("  6. 下一步可重启服务，运行此脚本 check 模式验证持久化")
     print()
-    print("  ══════════════════════════════════════════════════════════════")
-    print("    ✓ 完整链路全部验证通过！")
-    print("  ══════════════════════════════════════════════════════════════")
+    print("  " + "=" * 62)
+    print("    [OK] 完整链路全部验证通过！")
+    print("  " + "=" * 62)
     print()
 
 
