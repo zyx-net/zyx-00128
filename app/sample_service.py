@@ -402,7 +402,6 @@ class SampleService:
         new_version = self._increment_version(sample)
 
         sample.status = 'DISCARDED'
-        sample.is_deleted = True
 
         self._create_audit_log(
             sample=sample,

@@ -82,10 +82,8 @@ status_flow:
     label: 已借出
     allowed_next:
       - IN_STORAGE
-      - DISCARDED
     allowed_actions:
       - return
-      - discard
   DISCARDED:
     label: 已废弃
     allowed_next: []

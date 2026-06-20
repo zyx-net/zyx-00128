@@ -290,25 +290,39 @@ def main():
     # ========== 验收用例 4: 数据持久化 ==========
     header("验收用例 4: 数据一致性验证")
 
-    # 4.1 查询样本1最终状态（通过ID，因为废弃后is_deleted=True）
-    sample1_result = api_call("GET", f"/samples/{sample_id}")
+    # 4.1 样本1废弃后按编码查询能查到
+    sample1_by_code = api_call("GET", f"/samples/code/TEST-ACCEPT-001")
+    sample1_found_by_code = sample1_by_code.get("success", False)
+    test("4.1 样本1按编码查询能查到（废弃后仍可查）", sample1_found_by_code,
+         f"状态: {sample1_by_code.get('data', {}).get('status', 'N/A')}")
+
+    # 4.2 按编码查到的状态是 DISCARDED
+    sample1_status_ok = sample1_by_code.get("data", {}).get("status") == "DISCARDED"
+    test("4.2 按编码查询状态为 DISCARDED", sample1_status_ok,
+         f"状态: {sample1_by_code.get('data', {}).get('status', 'N/A')}")
+
+    # 4.3 审计日志完整
     sample1_logs = api_call("GET", f"/samples/{sample_id}/audit-logs")
-    sample1_found = sample1_result.get("success", False) or sample1_result.get("error") != "SAMPLE_NOT_FOUND"
-    test("4.1 样本1可通过ID查询", sample1_found,
-         f"状态: {sample1_result.get('data', {}).get('status', 'N/A')}")
-    test("4.2 样本1审计日志完整（5条）",
+    test("4.3 审计日志完整（5条）",
          len(sample1_logs["data"]) == 5,
          f"日志数量: {len(sample1_logs['data'])}")
 
-    # 4.3 导出CSV验证
+    # 4.4 按编码查询状态 vs 审计日志终态 一致
+    final_log_status = sample1_logs["data"][-1]["to_status"]
+    code_query_status = sample1_by_code.get("data", {}).get("status")
+    status_consistent = final_log_status == code_query_status == "DISCARDED"
+    test("4.4 按编码查询状态与审计日志终态一致", status_consistent,
+         f"编码查询: {code_query_status}, 日志终态: {final_log_status}")
+
+    # 4.5 导出CSV验证
     try:
         req = urllib.request.Request(f"{BASE_URL}/samples/{sample_id}/export-chain?role=LAB_TECHNICIAN")
         with urllib.request.urlopen(req) as resp:
             csv_content = resp.read().decode("utf-8-sig")
         has_csv_data = "样本编号" in csv_content and "TEST-ACCEPT-001" in csv_content
-        test("4.3 CSV导出功能正常", has_csv_data, "CSV包含样本编号")
+        test("4.5 CSV导出功能正常，包含样本编号", has_csv_data, "CSV包含样本编号")
     except Exception as e:
-        test("4.3 CSV导出功能正常", False, str(e))
+        test("4.5 CSV导出功能正常，包含样本编号", False, str(e))
 
     # ========== 验收用例 5: 角色权限 ==========
     header("验收用例 5: 角色权限验证")
@@ -337,6 +351,131 @@ def main():
     })
     discard_denied = (not result["success"]) and (result.get("error") == "PERMISSION_DENIED")
     test("5.3 LAB_TECHNICIAN不能废弃样本", discard_denied, f"错误码: {result.get('error')}")
+
+    # ========== 验收用例 6: 回归测试 ==========
+    header("验收用例 6: 回归测试 - 状态流转与查询一致性")
+
+    # 6.1 登记一个新样本，用于回归测试
+    result = api_call("POST", "/samples", {
+        "sample_code": "TEST-REGRESS-001",
+        "name": "回归测试样本-借出废弃链路",
+        "sample_type": "血液",
+        "required_temp_zone": "REFRIGERATED",
+        "operator": "回归测试员",
+        "operator_role": "LAB_TECHNICIAN"
+    })
+    reg_sample_id = result["data"]["id"]
+    reg_sample_code = "TEST-REGRESS-001"
+    test("6.1 登记回归测试样本成功", result["success"],
+         f"样本ID: {reg_sample_id}, 编号: {reg_sample_code}")
+
+    # 6.2 入库
+    result = api_call("POST", f"/samples/{reg_sample_id}/store-in", {
+        "location_id": 3,
+        "operator": "库管员",
+        "operator_role": "LAB_TECHNICIAN",
+        "expected_version": 1,
+        "reason": "入库"
+    })
+    reg_version = result["data"]["version"]
+    test("6.2 入库成功", result["success"], f"版本: {reg_version}")
+
+    # 6.3 借出
+    result = api_call("POST", f"/samples/{reg_sample_id}/borrow", {
+        "operator": "实验员",
+        "operator_role": "LAB_TECHNICIAN",
+        "expected_version": reg_version,
+        "reason": "实验使用"
+    })
+    reg_version = result["data"]["version"]
+    borrow_ok = result["success"] and result["data"]["status"] == "BORROWED"
+    test("6.3 借出成功，状态为 BORROWED", borrow_ok,
+         f"状态: {result.get('data', {}).get('status', 'N/A')}, 版本: {reg_version}")
+
+    # 6.4 借出状态下直接废弃 - 应该被拦截
+    result = api_call("POST", f"/samples/{reg_sample_id}/discard", {
+        "operator": "主管",
+        "operator_role": "LAB_MANAGER",
+        "expected_version": reg_version,
+        "reason": "尝试直接废弃借出样本"
+    })
+    borrow_discard_blocked = (not result["success"]) and (result.get("error") == "INVALID_STATUS_TRANSITION")
+    test("6.4 借出中直接废弃被拦截", borrow_discard_blocked,
+         f"错误码: {result.get('error')}, 信息: {result.get('message', '')[:50]}")
+
+    # 6.5 先退回
+    result = api_call("POST", f"/samples/{reg_sample_id}/return", {
+        "location_id": 3,
+        "operator": "实验员",
+        "operator_role": "LAB_TECHNICIAN",
+        "expected_version": reg_version,
+        "reason": "实验完成退回"
+    })
+    reg_version = result["data"]["version"]
+    return_ok = result["success"] and result["data"]["status"] == "IN_STORAGE"
+    test("6.5 退回成功，状态变回 IN_STORAGE", return_ok,
+         f"状态: {result.get('data', {}).get('status', 'N/A')}, 版本: {reg_version}")
+
+    # 6.6 退回后再废弃 - 应该成功
+    result = api_call("POST", f"/samples/{reg_sample_id}/discard", {
+        "operator": "主管",
+        "operator_role": "LAB_MANAGER",
+        "expected_version": reg_version,
+        "reason": "样本过期废弃"
+    })
+    reg_version = result["data"]["version"]
+    discard_ok = result["success"] and result["data"]["status"] == "DISCARDED"
+    test("6.6 退回后废弃成功，状态为 DISCARDED", discard_ok,
+         f"状态: {result.get('data', {}).get('status', 'N/A')}, 版本: {reg_version}")
+
+    # 6.7 废弃后按编码查询 - 必须能查到
+    result_by_code = api_call("GET", f"/samples/code/{reg_sample_code}")
+    code_query_ok = result_by_code.get("success", False) and result_by_code.get("data", {}).get("status") == "DISCARDED"
+    test("6.7 废弃后按编码查询能查到，状态为 DISCARDED", code_query_ok,
+         f"success: {result_by_code.get('success')}, 状态: {result_by_code.get('data', {}).get('status', 'N/A')}")
+
+    # 6.8 按编码查询的版本号与实际一致
+    code_version_match = result_by_code.get("data", {}).get("version") == reg_version
+    test("6.8 按编码查询的版本号与废弃后的版本一致", code_version_match,
+         f"查询版本: {result_by_code.get('data', {}).get('version')}, 实际版本: {reg_version}")
+
+    # 6.9 审计日志条数和状态
+    logs_result = api_call("GET", f"/samples/{reg_sample_id}/audit-logs")
+    logs_ok = len(logs_result["data"]) == 5  # 登记、入库、借出、退回、废弃
+    test("6.9 审计日志共5条（登记/入库/借出/退回/废弃）", logs_ok,
+         f"实际条数: {len(logs_result['data'])}")
+
+    # 6.10 审计日志最后一条是 DISCARD
+    last_log = logs_result["data"][-1]
+    last_log_ok = last_log["action"] == "DISCARD" and last_log["to_status"] == "DISCARDED"
+    test("6.10 审计日志最后一条是废弃操作", last_log_ok,
+         f"最后操作: {last_log.get('action')}, 目标状态: {last_log.get('to_status')}")
+
+    # 6.11 按编码查询状态 vs 审计日志终态 一致
+    code_status = result_by_code.get("data", {}).get("status")
+    log_final_status = last_log.get("to_status")
+    status_consistent = code_status == log_final_status == "DISCARDED"
+    test("6.11 按编码查询状态与审计日志终态一致", status_consistent,
+         f"编码查询状态: {code_status}, 日志终态: {log_final_status}")
+
+    # 6.12 CSV导出 与 按编码查询 一致
+    try:
+        req = urllib.request.Request(f"{BASE_URL}/samples/{reg_sample_id}/export-chain?role=LAB_TECHNICIAN")
+        with urllib.request.urlopen(req) as resp:
+            csv_content = resp.read().decode("utf-8-sig")
+        csv_has_sample = reg_sample_code in csv_content
+        csv_has_discard = "DISCARD" in csv_content
+        csv_ok = csv_has_sample and csv_has_discard
+        test("6.12 CSV导出包含样本编号和废弃记录，与查询一致", csv_ok,
+             f"包含样本编号: {csv_has_sample}, 包含废弃记录: {csv_has_discard}")
+    except Exception as e:
+        test("6.12 CSV导出包含样本编号和废弃记录，与查询一致", False, str(e))
+
+    # 6.13 样本列表中也能查到废弃样本
+    list_result = api_call("GET", "/samples?page=1&per_page=50")
+    in_list = any(s["sample_code"] == reg_sample_code for s in list_result.get("data", []))
+    test("6.13 废弃样本仍出现在列表中（状态为已废弃）", in_list,
+         f"列表中找到: {in_list}")
 
     # ========== 汇总 ==========
     print()
