@@ -1,0 +1,129 @@
+temp_zones:
+  - code: AMBIENT
+    name: 常温区
+    temp_range: "15°C ~ 25°C"
+    description: 普通室温保存
+
+  - code: REFRIGERATED
+    name: 冷藏区
+    temp_range: "2°C ~ 8°C"
+    description: 冷藏保存
+
+  - code: FROZEN
+    name: 冷冻区
+    temp_range: "-10°C ~ -20°C"
+    description: 冷冻保存
+
+  - code: DEEP_FROZEN
+    name: 深冻区
+    temp_range: "-70°C ~ -80°C"
+    description: 超低温保存
+
+roles:
+  - code: ADMIN
+    name: 系统管理员
+    permissions:
+      - sample.register
+      - sample.store_in
+      - sample.transfer
+      - sample.borrow
+      - sample.return
+      - sample.discard
+      - sample.view
+      - sample.export
+      - location.manage
+
+  - code: LAB_TECHNICIAN
+    name: 实验员
+    permissions:
+      - sample.register
+      - sample.store_in
+      - sample.transfer
+      - sample.borrow
+      - sample.return
+      - sample.view
+      - sample.export
+
+  - code: LAB_MANAGER
+    name: 实验室主管
+    permissions:
+      - sample.register
+      - sample.store_in
+      - sample.transfer
+      - sample.borrow
+      - sample.return
+      - sample.discard
+      - sample.view
+      - sample.export
+
+  - code: GUEST
+    name: 访客
+    permissions:
+      - sample.view
+
+status_flow:
+  REGISTERED:
+    label: 已登记
+    allowed_next:
+      - IN_STORAGE
+    allowed_actions:
+      - store_in
+  IN_STORAGE:
+    label: 在库
+    allowed_next:
+      - BORROWED
+      - IN_STORAGE
+      - DISCARDED
+    allowed_actions:
+      - transfer
+      - borrow
+      - discard
+  BORROWED:
+    label: 已借出
+    allowed_next:
+      - IN_STORAGE
+      - DISCARDED
+    allowed_actions:
+      - return
+      - discard
+  DISCARDED:
+    label: 已废弃
+    allowed_next: []
+    allowed_actions: []
+
+locations:
+  - code: AMB-001
+    name: 常温货架A区
+    temp_zone: AMBIENT
+    capacity: 200
+    description: 常温保存样本货架A区
+
+  - code: AMB-002
+    name: 常温货架B区
+    temp_zone: AMBIENT
+    capacity: 200
+    description: 常温保存样本货架B区
+
+  - code: REF-001
+    name: 冷藏冰箱1号
+    temp_zone: REFRIGERATED
+    capacity: 150
+    description: 2-8°C冷藏冰箱
+
+  - code: REF-002
+    name: 冷藏冰箱2号
+    temp_zone: REFRIGERATED
+    capacity: 150
+    description: 2-8°C冷藏冰箱
+
+  - code: FRZ-001
+    name: 冷冻冰箱1号
+    temp_zone: FROZEN
+    capacity: 100
+    description: -20°C冷冻冰箱
+
+  - code: DEEP-001
+    name: 深冻冰箱1号
+    temp_zone: DEEP_FROZEN
+    capacity: 80
+    description: -80°C超低温冰箱

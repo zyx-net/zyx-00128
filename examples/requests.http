@@ -1,0 +1,256 @@
+@baseUrl = http://localhost:5000/api
+
+### 0. 健康检查
+GET {{baseUrl}}/health
+Accept: application/json
+
+### 0. API文档
+GET {{baseUrl}}/docs
+Accept: application/json
+
+### 0. 获取温区配置
+GET {{baseUrl}}/config/temp-zones
+Accept: application/json
+
+### 0. 获取角色配置
+GET {{baseUrl}}/config/roles
+Accept: application/json
+
+### 0. 获取状态流转规则
+GET {{baseUrl}}/config/status-flow
+Accept: application/json
+
+### 0. 获取库位列表
+GET {{baseUrl}}/locations
+Accept: application/json
+
+### ========== 验收用例 1：完整生命周期（登记→入库→借出→退回→废弃） ==========
+
+### 1.1 登记冷藏样本
+POST {{baseUrl}}/samples
+Content-Type: application/json
+
+{
+  "sample_code": "TEST-2026-AC001",
+  "name": "验收测试样本-冷藏A",
+  "sample_type": "血液",
+  "required_temp_zone": "REFRIGERATED",
+  "operator": "测试员",
+  "operator_role": "LAB_TECHNICIAN",
+  "remark": "验收测试用-完整生命周期样本"
+}
+
+### 1.2 查询样本信息（获取版本号和ID）
+GET {{baseUrl}}/samples/code/TEST-2026-AC001
+Accept: application/json
+
+### 1.3 入库到冷藏库位（温区匹配）
+# 注意：将 expected_version 替换为上面查到的版本号，将 location_id 替换为冷藏库位ID
+POST {{baseUrl}}/samples/1/store-in
+Content-Type: application/json
+
+{
+  "location_id": 3,
+  "operator": "库管员小王",
+  "operator_role": "LAB_TECHNICIAN",
+  "expected_version": 1,
+  "reason": "样本接收入库"
+}
+
+### 1.4 查询样本状态（应为 IN_STORAGE，版本号应为 2）
+GET {{baseUrl}}/samples/code/TEST-2026-AC001
+Accept: application/json
+
+### 1.5 借出样本
+POST {{baseUrl}}/samples/1/borrow
+Content-Type: application/json
+
+{
+  "operator": "实验员小李",
+  "operator_role": "LAB_TECHNICIAN",
+  "expected_version": 2,
+  "reason": "进行生化检测实验",
+  "remark": "预计使用3天"
+}
+
+### 1.6 查询样本状态（应为 BORROWED，版本号应为 3）
+GET {{baseUrl}}/samples/code/TEST-2026-AC001
+Accept: application/json
+
+### 1.7 退回样本
+POST {{baseUrl}}/samples/1/return
+Content-Type: application/json
+
+{
+  "location_id": 3,
+  "operator": "实验员小李",
+  "operator_role": "LAB_TECHNICIAN",
+  "expected_version": 3,
+  "reason": "实验完成，样本退回",
+  "remark": "样本完好"
+}
+
+### 1.8 查询样本状态（应为 IN_STORAGE，版本号应为 4）
+GET {{baseUrl}}/samples/code/TEST-2026-AC001
+Accept: application/json
+
+### 1.9 废弃样本（需要 LAB_MANAGER 角色）
+POST {{baseUrl}}/samples/1/discard
+Content-Type: application/json
+
+{
+  "operator": "主管老王",
+  "operator_role": "LAB_MANAGER",
+  "expected_version": 4,
+  "reason": "样本已过有效期，按规定废弃",
+  "remark": "废弃处理完成"
+}
+
+### 1.10 查询样本最终状态（应为 DISCARDED，版本号应为 5）
+GET {{baseUrl}}/samples/code/TEST-2026-AC001
+Accept: application/json
+
+### 1.11 查看审计日志
+GET {{baseUrl}}/samples/1/audit-logs
+Accept: application/json
+
+### 1.12 导出交接链 CSV
+GET {{baseUrl}}/samples/1/export-chain?role=LAB_TECHNICIAN
+Accept: text/csv
+
+### ========== 验收用例 2：温区不匹配导致入库失败 ==========
+
+### 2.1 登记冷冻样本
+POST {{baseUrl}}/samples
+Content-Type: application/json
+
+{
+  "sample_code": "TEST-2026-AC002",
+  "name": "验收测试样本-冷冻B",
+  "sample_type": "血清",
+  "required_temp_zone": "FROZEN",
+  "operator": "测试员",
+  "operator_role": "LAB_TECHNICIAN",
+  "remark": "验收测试用-温区不匹配样本"
+}
+
+### 2.2 尝试入库到常温库位（温区不匹配，应失败）
+# 预期返回 TEMP_ZONE_MISMATCH 错误
+POST {{baseUrl}}/samples/2/store-in
+Content-Type: application/json
+
+{
+  "location_id": 1,
+  "operator": "库管员小王",
+  "operator_role": "LAB_TECHNICIAN",
+  "expected_version": 1,
+  "reason": "测试温区校验"
+}
+
+### 2.3 正确入库到冷冻库位
+POST {{baseUrl}}/samples/2/store-in
+Content-Type: application/json
+
+{
+  "location_id": 5,
+  "operator": "库管员小王",
+  "operator_role": "LAB_TECHNICIAN",
+  "expected_version": 1,
+  "reason": "样本入库"
+}
+
+### 2.4 尝试转移到冷藏库位（温区不匹配，应失败）
+# 预期返回 TEMP_ZONE_MISMATCH 错误
+POST {{baseUrl}}/samples/2/transfer
+Content-Type: application/json
+
+{
+  "to_location_id": 3,
+  "operator": "库管员小王",
+  "operator_role": "LAB_TECHNICIAN",
+  "expected_version": 2,
+  "reason": "测试转移温区校验"
+}
+
+### ========== 验收用例 3：乐观锁 - 两次基于旧版本更新只能成功一次 ==========
+
+### 3.1 登记常温样本
+POST {{baseUrl}}/samples
+Content-Type: application/json
+
+{
+  "sample_code": "TEST-2026-AC003",
+  "name": "验收测试样本-常温C",
+  "sample_type": "尿液",
+  "required_temp_zone": "AMBIENT",
+  "operator": "测试员",
+  "operator_role": "LAB_TECHNICIAN",
+  "remark": "验收测试用-乐观锁验证"
+}
+
+### 3.2 入库到常温库位A
+POST {{baseUrl}}/samples/3/store-in
+Content-Type: application/json
+
+{
+  "location_id": 1,
+  "operator": "库管员小王",
+  "operator_role": "LAB_TECHNICIAN",
+  "expected_version": 1,
+  "reason": "样本入库"
+}
+
+### 3.3 尝试基于旧版本(version=2)转移到常温库位B - 第一次（应该成功）
+POST {{baseUrl}}/samples/3/transfer
+Content-Type: application/json
+
+{
+  "to_location_id": 2,
+  "operator": "操作员A",
+  "operator_role": "LAB_TECHNICIAN",
+  "expected_version": 2,
+  "reason": "转移到B区"
+}
+
+### 3.4 尝试基于旧版本(version=2)再次转移 - 第二次（应该失败，版本冲突）
+# 预期返回 VERSION_CONFLICT 错误
+POST {{baseUrl}}/samples/3/transfer
+Content-Type: application/json
+
+{
+  "to_location_id": 1,
+  "operator": "操作员B",
+  "operator_role": "LAB_TECHNICIAN",
+  "expected_version": 2,
+  "reason": "转移到A区"
+}
+
+### 3.5 查询当前版本和状态
+GET {{baseUrl}}/samples/code/TEST-2026-AC003
+Accept: application/json
+
+### 3.6 查看审计日志（验证只有第一次转移成功）
+GET {{baseUrl}}/samples/3/audit-logs
+Accept: application/json
+
+### ========== 其他常用接口 ==========
+
+### 获取样本列表
+GET {{baseUrl}}/samples?page=1&per_page=10
+Accept: application/json
+
+### 按状态筛选样本
+GET {{baseUrl}}/samples?status=IN_STORAGE
+Accept: application/json
+
+### 按温区筛选样本
+GET {{baseUrl}}/samples?temp_zone=REFRIGERATED
+Accept: application/json
+
+### 按温区筛选库位
+GET {{baseUrl}}/locations?temp_zone=REFRIGERATED
+Accept: application/json
+
+### 导出所有样本CSV
+GET {{baseUrl}}/samples/export?role=LAB_TECHNICIAN
+Accept: text/csv
