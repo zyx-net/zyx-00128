@@ -6,6 +6,8 @@ from .config import ConfigManager
 from .sample_service import SampleService, SampleServiceError
 from .location_service import LocationService
 from .export_service import ExportService
+from .import_service import ImportService
+from .undo_service import UndoService
 
 
 def create_app():
@@ -29,6 +31,8 @@ def create_app():
     sample_service = SampleService()
     location_service = LocationService()
     export_service = ExportService()
+    import_service = ImportService()
+    undo_service = UndoService()
     config_manager = ConfigManager()
 
     @app.errorhandler(SampleServiceError)
@@ -322,6 +326,258 @@ def create_app():
             }
         )
 
+    @app.route('/api/samples/import/csv', methods=['POST'])
+    def import_samples_csv():
+        data = request.get_json() or {}
+        csv_content = data.get('csv_content') or data.get('csv')
+        if not csv_content:
+            return jsonify({
+                'success': False,
+                'error': 'MISSING_CSV',
+                'message': '缺少 CSV 内容（csv_content 字段）'
+            }), 400
+        batch = import_service.import_csv(
+            csv_content=csv_content,
+            operator=data.get('operator', 'system'),
+            operator_role=data.get('operator_role', 'LAB_TECHNICIAN'),
+            import_mode=data.get('import_mode'),
+            strategy=data.get('strategy'),
+            batch_code=data.get('batch_code'),
+            file_name=data.get('file_name'),
+            remark=data.get('remark')
+        )
+        records, _ = import_service.get_batch_records(batch.id, page=1, per_page=10000)
+        return jsonify({
+            'success': True,
+            'data': {
+                'batch': batch.to_dict(),
+                'records': [r.to_dict() for r in records]
+            }
+        }), 201
+
+    @app.route('/api/import/batches', methods=['GET'])
+    def list_import_batches():
+        status = request.args.get('status')
+        page = int(request.args.get('page', 1))
+        per_page = int(request.args.get('per_page', 20))
+        batches, total = import_service.list_batches(status=status, page=page, per_page=per_page)
+        return jsonify({
+            'success': True,
+            'data': [b.to_dict() for b in batches],
+            'pagination': {
+                'page': page,
+                'per_page': per_page,
+                'total': total,
+                'pages': (total + per_page - 1) // per_page
+            }
+        })
+
+    @app.route('/api/import/batches/<int:batch_id>', methods=['GET'])
+    def get_import_batch(batch_id):
+        batch = import_service.get_batch(batch_id)
+        if not batch:
+            return jsonify({
+                'success': False,
+                'error': 'BATCH_NOT_FOUND',
+                'message': f'导入批次不存在: {batch_id}'
+            }), 404
+        return jsonify({
+            'success': True,
+            'data': batch.to_dict()
+        })
+
+    @app.route('/api/import/batches/code/<batch_code>', methods=['GET'])
+    def get_import_batch_by_code(batch_code):
+        batch = import_service.get_batch_by_code(batch_code)
+        if not batch:
+            return jsonify({
+                'success': False,
+                'error': 'BATCH_NOT_FOUND',
+                'message': f'导入批次不存在: {batch_code}'
+            }), 404
+        return jsonify({
+            'success': True,
+            'data': batch.to_dict()
+        })
+
+    @app.route('/api/import/batches/<int:batch_id>/records', methods=['GET'])
+    def get_import_batch_records(batch_id):
+        batch = import_service.get_batch(batch_id)
+        if not batch:
+            return jsonify({
+                'success': False,
+                'error': 'BATCH_NOT_FOUND',
+                'message': f'导入批次不存在: {batch_id}'
+            }), 404
+        result_filter = request.args.get('result')
+        retryable_only = request.args.get('retryable_only', 'false').lower() == 'true'
+        page = int(request.args.get('page', 1))
+        per_page = int(request.args.get('per_page', 100))
+        records, total = import_service.get_batch_records(
+            batch_id=batch_id,
+            result=result_filter,
+            retryable_only=retryable_only,
+            page=page,
+            per_page=per_page
+        )
+        return jsonify({
+            'success': True,
+            'data': [r.to_dict() for r in records],
+            'pagination': {
+                'page': page,
+                'per_page': per_page,
+                'total': total,
+                'pages': (total + per_page - 1) // per_page
+            }
+        })
+
+    @app.route('/api/import/batches/<int:batch_id>/errors/csv', methods=['GET'])
+    def download_batch_errors_csv(batch_id):
+        batch = import_service.get_batch(batch_id)
+        if not batch:
+            return jsonify({
+                'success': False,
+                'error': 'BATCH_NOT_FOUND',
+                'message': f'导入批次不存在: {batch_id}'
+            }), 404
+        csv_content = import_service.generate_error_csv_content(batch_id)
+        filename = f'{batch.batch_code}_errors.csv'
+        return Response(
+            csv_content.encode('utf-8-sig'),
+            mimetype='text/csv; charset=utf-8',
+            headers={
+                'Content-Disposition': f'attachment; filename="{filename}"',
+                'Content-Type': 'text/csv; charset=utf-8'
+            }
+        )
+
+    @app.route('/api/import/batches/<int:batch_id>/retry', methods=['POST'])
+    def retry_failed_imports(batch_id):
+        data = request.get_json() or {}
+        new_batch = import_service.retry_failed_records(
+            batch_id=batch_id,
+            operator=data.get('operator', 'system'),
+            operator_role=data.get('operator_role', 'LAB_TECHNICIAN')
+        )
+        records, _ = import_service.get_batch_records(new_batch.id, page=1, per_page=10000)
+        return jsonify({
+            'success': True,
+            'data': {
+                'batch': new_batch.to_dict(),
+                'records': [r.to_dict() for r in records]
+            }
+        }), 201
+
+    @app.route('/api/import/template.csv', methods=['GET'])
+    def download_import_template():
+        import csv
+        import io
+        headers = import_service.CSV_HEADERS
+        output = io.StringIO()
+        writer = csv.DictWriter(output, fieldnames=headers)
+        writer.writeheader()
+        writer.writerow({
+            'sample_code': 'SAMPLE-001',
+            'name': '示例样本-血液',
+            'sample_type': '血液',
+            'required_temp_zone': 'REFRIGERATED',
+            'version': '',
+            'location_code': 'REF-001',
+            'status': '',
+            'remark': '这是示例行，请删除后填入实际数据'
+        })
+        csv_content = output.getvalue()
+        return Response(
+            csv_content.encode('utf-8-sig'),
+            mimetype='text/csv; charset=utf-8',
+            headers={
+                'Content-Disposition': 'attachment; filename="import_template.csv"',
+                'Content-Type': 'text/csv; charset=utf-8'
+            }
+        )
+
+    @app.route('/api/undo/available', methods=['GET'])
+    def list_available_undo():
+        sample_id = request.args.get('sample_id', type=int)
+        page = int(request.args.get('page', 1))
+        per_page = int(request.args.get('per_page', 20))
+        records, total = undo_service.list_available_undo(
+            sample_id=sample_id,
+            page=page,
+            per_page=per_page
+        )
+        return jsonify({
+            'success': True,
+            'data': [r.to_dict() for r in records],
+            'pagination': {
+                'page': page,
+                'per_page': per_page,
+                'total': total,
+                'pages': (total + per_page - 1) // per_page
+            }
+        })
+
+    @app.route('/api/undo/<undo_token>', methods=['GET'])
+    def get_undo_record(undo_token):
+        undo = undo_service.get_undo_record(undo_token)
+        if not undo:
+            return jsonify({
+                'success': False,
+                'error': 'UNDO_NOT_FOUND',
+                'message': f'撤销记录不存在: {undo_token}'
+            }), 404
+        return jsonify({
+            'success': True,
+            'data': undo.to_dict()
+        })
+
+    @app.route('/api/undo/<undo_token>', methods=['POST'])
+    def execute_undo(undo_token):
+        data = request.get_json() or {}
+        cascading = data.get('cascading', False)
+        if cascading:
+            samples = undo_service.execute_cascading_undo(
+                undo_token=undo_token,
+                operator=data.get('operator', 'system'),
+                operator_role=data.get('operator_role', 'LAB_MANAGER'),
+                reason=data.get('reason')
+            )
+            return jsonify({
+                'success': True,
+                'data': {
+                    'cascading': True,
+                    'count': len(samples),
+                    'samples': [s.to_dict() for s in samples]
+                }
+            })
+        else:
+            sample = undo_service.execute_undo(
+                undo_token=undo_token,
+                operator=data.get('operator', 'system'),
+                operator_role=data.get('operator_role', 'LAB_MANAGER'),
+                reason=data.get('reason')
+            )
+            return jsonify({
+                'success': True,
+                'data': {
+                    'cascading': False,
+                    'sample': sample.to_dict()
+                }
+            })
+
+    @app.route('/api/samples/<int:sample_id>/undo-chain', methods=['GET'])
+    def get_sample_undo_chain(sample_id):
+        records, total = undo_service.list_available_undo(
+            sample_id=sample_id,
+            page=1,
+            per_page=100
+        )
+        return jsonify({
+            'success': True,
+            'data': [r.to_dict() for r in records],
+            'total': total
+        })
+
     @app.route('/api/docs', methods=['GET'])
     def api_docs():
         docs = {
@@ -361,6 +617,22 @@ def create_app():
                 '数据导出': {
                     'GET /api/samples/<id>/export-chain': '导出样本交接链CSV',
                     'GET /api/samples/export': '导出样本列表CSV'
+                },
+                '批量导入': {
+                    'POST /api/samples/import/csv': 'CSV批量导入样本（支持登记+更新）',
+                    'GET /api/import/template.csv': '下载导入模板CSV',
+                    'GET /api/import/batches': '查询导入批次列表',
+                    'GET /api/import/batches/<id>': '查询单个导入批次详情',
+                    'GET /api/import/batches/code/<code>': '按批次号查询',
+                    'GET /api/import/batches/<id>/records': '查询批次明细记录',
+                    'GET /api/import/batches/<id>/errors/csv': '下载批次错误清单CSV',
+                    'POST /api/import/batches/<id>/retry': '重跑批次中的失败记录'
+                },
+                '撤销链路': {
+                    'GET /api/undo/available': '查询可撤销的操作列表',
+                    'GET /api/samples/<id>/undo-chain': '查询某样本的可撤销链路',
+                    'GET /api/undo/<token>': '查询单个撤销记录',
+                    'POST /api/undo/<token>': '执行撤销（支持cascading参数级联撤销）'
                 }
             },
             '通用请求头': {

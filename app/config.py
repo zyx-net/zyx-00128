@@ -89,3 +89,63 @@ class ConfigManager:
 
     def get_location_config(self, code: str) -> Optional[Dict[str, Any]]:
         return self.location_map.get(code)
+
+    @property
+    def import_strategy(self) -> Dict[str, Any]:
+        return self._config.get('import_strategy', {})
+
+    def get_default_import_strategy(self) -> str:
+        return self.import_strategy.get('default_strategy', 'FAIL_ON_DUPLICATE')
+
+    def is_valid_import_strategy(self, strategy: str) -> bool:
+        return strategy in self.import_strategy.get('allowed_strategies', [])
+
+    def get_default_import_mode(self) -> str:
+        return self.import_strategy.get('default_mode', 'REGISTER')
+
+    def is_valid_import_mode(self, mode: str) -> bool:
+        return mode in self.import_strategy.get('allowed_modes', [])
+
+    def get_batch_code_prefix(self) -> str:
+        return self.import_strategy.get('batch_code_prefix', 'IMP')
+
+    def get_import_undo_window(self) -> int:
+        return self.import_strategy.get('undo_window_minutes', 30)
+
+    def get_max_batch_size(self) -> int:
+        return self.import_strategy.get('max_batch_size', 1000)
+
+    def is_import_idempotent(self) -> bool:
+        return self.import_strategy.get('idempotent_by_batch_code', True)
+
+    def require_version_on_update(self) -> bool:
+        return self.import_strategy.get('require_version_on_update', True)
+
+    @property
+    def undo_policy(self) -> Dict[str, Any]:
+        return self._config.get('undo_policy', {})
+
+    def is_action_undoable(self, action: str) -> bool:
+        undoable = self.undo_policy.get('undoable_actions', [])
+        non_undoable = self.undo_policy.get('non_undoable_actions', [])
+        if action in non_undoable:
+            return False
+        return action in undoable
+
+    def require_same_operator_for_undo(self) -> bool:
+        return self.undo_policy.get('require_same_operator', False)
+
+    def get_undo_required_roles(self) -> List[str]:
+        return self.undo_policy.get('require_roles', [])
+
+    def has_undo_permission(self, role: str) -> bool:
+        required = self.get_undo_required_roles()
+        if not required:
+            return True
+        return role in required
+
+    def get_undo_window_minutes(self) -> int:
+        return self.undo_policy.get('undo_window_minutes', 30)
+
+    def is_cascading_undo(self) -> bool:
+        return self.undo_policy.get('cascading_undo', True)

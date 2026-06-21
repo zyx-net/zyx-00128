@@ -93,7 +93,7 @@ class ExportService:
                 sample.sample_type or '',
                 temp_zone_name,
                 status_label,
-                sample.location_name or '',
+                sample.location.name if sample.location else '',
                 sample.version,
                 sample.created_by,
                 sample.created_at.isoformat() if sample.created_at else '',

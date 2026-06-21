@@ -1,7 +1,8 @@
-from datetime import datetime
+import uuid
+from datetime import datetime, timedelta
 from typing import Optional, Tuple, List
 
-from .models import db, Sample, Location, AuditLog
+from .models import db, Sample, Location, AuditLog, UndoRecord
 from .config import ConfigManager
 
 
@@ -68,6 +69,52 @@ class SampleService:
         db.session.add(log)
         return log
 
+    def _create_undo_record_after_commit(
+        self,
+        sample: Sample,
+        audit_log: AuditLog,
+        original_action: str,
+        operator: str,
+        operator_role: str,
+        from_status: Optional[str] = None,
+        to_status: Optional[str] = None,
+        from_location_id: Optional[int] = None,
+        to_location_id: Optional[int] = None
+    ) -> Optional[UndoRecord]:
+        if not self.config.is_action_undoable(original_action):
+            return None
+
+        undo_window = self.config.get_undo_window_minutes()
+        expires_at = datetime.utcnow() + timedelta(minutes=undo_window)
+        undo_token = "UNDO-" + uuid.uuid4().hex[:16].upper()
+        allowed_roles = self.config.get_undo_required_roles()
+
+        undo_record = UndoRecord(
+            sample_id=sample.id,
+            audit_log_id=audit_log.id,
+            undo_token=undo_token,
+            from_status=from_status,
+            to_status=to_status,
+            from_location_id=from_location_id,
+            to_location_id=to_location_id,
+            original_action=original_action,
+            can_undo=True,
+            undone=False,
+            operator=operator,
+            operator_role=operator_role,
+            allowed_roles=','.join(allowed_roles) if allowed_roles else None,
+            expires_at=expires_at
+        )
+        db.session.add(undo_record)
+        return undo_record
+
+    def _invalidate_previous_undos(self, sample_id: int):
+        UndoRecord.query.filter(
+            UndoRecord.sample_id == sample_id,
+            UndoRecord.can_undo == True,
+            UndoRecord.undone == False
+        ).update({'can_undo': False}, synchronize_session=False)
+
     def register_sample(
         self,
         sample_code: str,
@@ -106,7 +153,7 @@ class SampleService:
         db.session.add(sample)
         db.session.flush()
 
-        self._create_audit_log(
+        audit_log = self._create_audit_log(
             sample=sample,
             action='REGISTER',
             operator=operator,
@@ -115,6 +162,19 @@ class SampleService:
             reason='样本登记',
             remark=remark,
             version=1
+        )
+        db.session.flush()
+
+        self._create_undo_record_after_commit(
+            sample=sample,
+            audit_log=audit_log,
+            original_action='REGISTER',
+            operator=operator,
+            operator_role=operator_role,
+            from_status=None,
+            to_status='REGISTERED',
+            from_location_id=None,
+            to_location_id=None
         )
 
         db.session.commit()
@@ -171,7 +231,7 @@ class SampleService:
         sample.status = 'IN_STORAGE'
         new_version = self._increment_version(sample)
 
-        self._create_audit_log(
+        audit_log = self._create_audit_log(
             sample=sample,
             action='STORE_IN',
             operator=operator,
@@ -182,6 +242,19 @@ class SampleService:
             to_location_id=location_id,
             reason=reason or '样本入库',
             version=new_version
+        )
+        db.session.flush()
+
+        self._create_undo_record_after_commit(
+            sample=sample,
+            audit_log=audit_log,
+            original_action='STORE_IN',
+            operator=operator,
+            operator_role=operator_role,
+            from_status=from_status,
+            to_status='IN_STORAGE',
+            from_location_id=from_location_id,
+            to_location_id=location_id
         )
 
         db.session.commit()
@@ -241,7 +314,7 @@ class SampleService:
         new_version = self._increment_version(sample)
         sample.location_id = to_location_id
 
-        self._create_audit_log(
+        audit_log = self._create_audit_log(
             sample=sample,
             action='TRANSFER',
             operator=operator,
@@ -252,6 +325,19 @@ class SampleService:
             to_location_id=to_location_id,
             reason=reason or '库位转移',
             version=new_version
+        )
+        db.session.flush()
+
+        self._create_undo_record_after_commit(
+            sample=sample,
+            audit_log=audit_log,
+            original_action='TRANSFER',
+            operator=operator,
+            operator_role=operator_role,
+            from_status=sample.status,
+            to_status=sample.status,
+            from_location_id=from_location_id,
+            to_location_id=to_location_id
         )
 
         db.session.commit()
@@ -286,7 +372,7 @@ class SampleService:
 
         sample.status = 'BORROWED'
 
-        self._create_audit_log(
+        audit_log = self._create_audit_log(
             sample=sample,
             action='BORROW',
             operator=operator,
@@ -298,6 +384,19 @@ class SampleService:
             reason=reason or '样本借出',
             remark=remark,
             version=new_version
+        )
+        db.session.flush()
+
+        self._create_undo_record_after_commit(
+            sample=sample,
+            audit_log=audit_log,
+            original_action='BORROW',
+            operator=operator,
+            operator_role=operator_role,
+            from_status=from_status,
+            to_status='BORROWED',
+            from_location_id=from_location_id,
+            to_location_id=None
         )
 
         db.session.commit()
@@ -354,7 +453,7 @@ class SampleService:
         sample.status = 'IN_STORAGE'
         sample.location_id = location_id
 
-        self._create_audit_log(
+        audit_log = self._create_audit_log(
             sample=sample,
             action='RETURN',
             operator=operator,
@@ -366,6 +465,19 @@ class SampleService:
             reason=reason or '样本退回',
             remark=remark,
             version=new_version
+        )
+        db.session.flush()
+
+        self._create_undo_record_after_commit(
+            sample=sample,
+            audit_log=audit_log,
+            original_action='RETURN',
+            operator=operator,
+            operator_role=operator_role,
+            from_status=from_status,
+            to_status='IN_STORAGE',
+            from_location_id=None,
+            to_location_id=location_id
         )
 
         db.session.commit()
@@ -403,7 +515,7 @@ class SampleService:
 
         sample.status = 'DISCARDED'
 
-        self._create_audit_log(
+        audit_log = self._create_audit_log(
             sample=sample,
             action='DISCARD',
             operator=operator,
@@ -416,6 +528,9 @@ class SampleService:
             remark=remark,
             version=new_version
         )
+        db.session.flush()
+
+        self._invalidate_previous_undos(sample.id)
 
         db.session.commit()
         return sample
@@ -425,7 +540,7 @@ class SampleService:
             return Sample.query.filter_by(id=sample_id).first()
         return Sample.query.filter_by(id=sample_id, is_deleted=False).first()
 
-    def get_sample_by_code(self, sample_code: str, include_deleted: bool = False) -> Optional[Sample]:
+    def get_sample_by_code(self, sample_code: str, include_deleted: bool = True) -> Optional[Sample]:
         if include_deleted:
             return Sample.query.filter_by(sample_code=sample_code).first()
         return Sample.query.filter_by(sample_code=sample_code, is_deleted=False).first()

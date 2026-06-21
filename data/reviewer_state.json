@@ -1,0 +1,20 @@
+{
+  "existing_id": 5,
+  "existing_code": "RV-EXIST-1782007566354",
+  "batch_id": 1,
+  "batch_code": "REVIEW-BATCH-1782007566354",
+  "retryable_failed_total": 2,
+  "error_csv_text": "sample_code,name,sample_type,required_temp_zone,version,location_code,status,remark,error_code,error_message\r\nRV-EXIST-1782007566354,dup wrong version,serum,REFRIGERATED,999,REF-001,,bad version,VERSION_CONFLICT,版本冲突：当前版本为 3，您提供的版本为 999，请刷新后重试\r\nRV-TMM-1782007566354,temp mismatch,serum,FROZEN,,REF-001,,wrong loc zone,TEMP_ZONE_MISMATCH,温区不匹配：样本需要 冷冻区，但库位 '冷藏冰箱1号' 属于 冷藏区\r\n",
+  "same_batch_returned": 1,
+  "undo_token": "UNDO-6EE1279F890B47F7",
+  "undo_fail": {
+    "error": "PERMISSION_DENIED",
+    "message": "角色 'LAB_TECHNICIAN' 没有撤销权限，需要角色: ADMIN, LAB_MANAGER",
+    "success": false
+  },
+  "final_status_before_restart": "REGISTERED",
+  "final_version_before_restart": 4,
+  "audit_last_action": "UNDO_STORE_IN",
+  "audit_last_status": "REGISTERED",
+  "chain_csv": "样本编号,RV-EXIST-1782007566354,样本名称,dup should update,样本类型,serum,所需温区,冷藏区,当前状态,已登记,当前版本,4\r\n\r\n序号,操作类型,原状态,新状态,原库位,新库位,操作人,操作角色,原因,版本号,备注,操作时间\r\n1,REGISTER,,REGISTERED,,,reviewer,LAB_TECHNICIAN,样本登记,1,,2026-06-21T02:06:06.389646\r\n2,UPDATE,REGISTERED,REGISTERED,,,reviewer,LAB_TECHNICIAN,批量导入更新: 名称更新为 dup should update; 类型更新为 serum; 备注已更新,2,,2026-06-21T02:06:06.430719\r\n3,STORE_IN,REGISTERED,IN_STORAGE,,冷藏冰箱1号,reviewer,LAB_TECHNICIAN,批量导入入库,3,,2026-06-21T02:06:06.434325\r\n4,UNDO_STORE_IN,IN_STORAGE,REGISTERED,冷藏冰箱1号,,manager1,LAB_MANAGER,review undo success,4,撤销Token: UNDO-6EE1279F890B47F7,2026-06-21T02:06:06.521992\r\n"
+}

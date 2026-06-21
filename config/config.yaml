@@ -125,3 +125,36 @@ locations:
     temp_zone: DEEP_FROZEN
     capacity: 80
     description: -80°C超低温冰箱
+
+import_strategy:
+  default_strategy: FAIL_ON_DUPLICATE
+  allowed_strategies:
+    - FAIL_ON_DUPLICATE
+    - UPDATE_IF_EXISTS
+    - SKIP_DUPLICATE
+  default_mode: REGISTER
+  allowed_modes:
+    - REGISTER
+    - REGISTER_OR_UPDATE
+    - UPDATE_ONLY
+  batch_code_prefix: IMP
+  undo_window_minutes: 30
+  max_batch_size: 1000
+  idempotent_by_batch_code: true
+  require_version_on_update: true
+
+undo_policy:
+  undoable_actions:
+    - REGISTER
+    - STORE_IN
+    - TRANSFER
+    - BORROW
+    - RETURN
+  non_undoable_actions:
+    - DISCARD
+  require_same_operator: false
+  require_roles:
+    - ADMIN
+    - LAB_MANAGER
+  undo_window_minutes: 30
+  cascading_undo: true
