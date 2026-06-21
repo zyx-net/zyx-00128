@@ -1,0 +1,2 @@
+﻿sample_code,name,sample_type,required_temp_zone,version,location_code,status,remark,error_code,error_message
+RV-BAD-1782034612958,??????,??,AMBIENT,,REF-001,,review bad temp mismatch,TEMP_ZONE_MISMATCH,温区不匹配：样本需要 常温区，但库位 '冷藏冰箱1号' 属于 冷藏区

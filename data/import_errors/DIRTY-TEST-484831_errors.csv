@@ -1,0 +1,3 @@
+﻿sample_code,name,sample_type,required_temp_zone,version,location_code,status,remark,error_code,error_message
+DIRTY-TEMP-484831,温区错配样本,血液,REFRIGERATED,,AMB-001,,,TEMP_ZONE_MISMATCH,温区不匹配：样本需要 冷藏区，但库位 '常温货架A区' 属于 常温区
+DIRTY-LOC-484831,库位不存在样本,血液,REFRIGERATED,,NO-SUCH-LOC-999,,,LOCATION_NOT_FOUND,库位不存在: NO-SUCH-LOC-999

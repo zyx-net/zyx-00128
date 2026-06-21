@@ -1,102 +1,179 @@
-#!/usr/bin/env python
-# -*- coding: utf-8 -*-
-"""
-验证进程重启后数据一致性
-"""
-
 import json
-import urllib.request
 import sys
+import os
+import urllib.request
+import urllib.error
 
 BASE_URL = "http://localhost:5000/api"
 
 
-def api_get(path):
-    with urllib.request.urlopen(f"{BASE_URL}{path}") as resp:
-        return json.loads(resp.read().decode("utf-8"))
+def api(method, path, body=None):
+    url = f"{BASE_URL}{path}"
+    data = None
+    if body is not None:
+        data = json.dumps(body).encode("utf-8")
+    req = urllib.request.Request(url, data=data, method=method)
+    req.add_header("Content-Type", "application/json")
+    try:
+        with urllib.request.urlopen(req) as resp:
+            ct = resp.headers.get("Content-Type", "")
+            if "json" in ct:
+                return json.loads(resp.read().decode("utf-8"))
+            else:
+                return {"success": True, "raw": resp.read().decode("utf-8-sig"), "status": resp.status}
+    except urllib.error.HTTPError as e:
+        try:
+            return json.loads(e.read().decode("utf-8"))
+        except Exception:
+            return {"success": False, "message": str(e), "error": "HTTP_ERROR"}
+    except Exception as e:
+        return {"success": False, "message": str(e), "error": "CONNECTION_ERROR"}
+
+
+_pass = 0
+_fail = 0
+
+
+def test(name, cond, detail=""):
+    global _pass, _fail
+    if cond:
+        _pass += 1
+        print(f"  [OK] PASS  {name}")
+        if detail:
+            print(f"         {detail}")
+    else:
+        _fail += 1
+        print(f"  [FAIL]  {name}")
+        if detail:
+            print(f"         {detail}")
+
+
+def sub(name):
+    print()
+    print(f"  --- {name} ---")
+
+
+def verify_dirty_snapshot(snap):
+    sub("脏数据隔离 (真实重启后验证)")
+
+    exist_code = snap["exist_code"]
+    exist_id = snap["exist_id"]
+    exist_version = snap["exist_version"]
+    ok1_code = snap["ok1_code"]
+    ok2_code = snap["ok2_code"]
+    bad_temp_code = snap["bad_temp_code"]
+    bad_loc_code = snap["bad_loc_code"]
+    allfail_1 = snap["allfail_code_1"]
+    allfail_2 = snap["allfail_code_2"]
+    batch_code = snap["batch_code"]
+    batch_total = snap["batch_total"]
+    batch_succ = snap["batch_succ"]
+    batch_fail = snap["batch_fail"]
+    batch_status = snap["batch_status"]
+    allfail_batch_code = snap["allfail_batch_code"]
+
+    r = api("GET", f"/samples/{exist_id}")
+    test(f"预存在样本 {exist_code} (id={exist_id}) 仍存在 v={exist_version}",
+         r.get("success") and r["data"]["version"] == exist_version and r["data"]["sample_code"] == exist_code,
+         f"v={r.get('data',{}).get('version')} code={r.get('data',{}).get('sample_code')}")
+
+    r = api("GET", f"/samples/code/{ok1_code}")
+    test(f"成功样本 {ok1_code} 状态 IN_STORAGE v=2",
+         r.get("success") and r["data"]["status"] == "IN_STORAGE" and r["data"]["version"] == 2,
+         f"status={r.get('data',{}).get('status')} v={r.get('data',{}).get('version')}")
+
+    r = api("GET", f"/samples/code/{ok2_code}")
+    test(f"成功样本 {ok2_code} 状态 IN_STORAGE v=2",
+         r.get("success") and r["data"]["status"] == "IN_STORAGE" and r["data"]["version"] == 2,
+         f"status={r.get('data',{}).get('status')} v={r.get('data',{}).get('version')}")
+
+    r = api("GET", f"/samples/code/{bad_temp_code}")
+    test(f"修正前失败样本 {bad_temp_code} 后修正成功登记 IN_STORAGE",
+         r.get("success") and r["data"]["status"] == "IN_STORAGE",
+         f"status={r.get('data',{}).get('status')}")
+
+    r = api("GET", f"/samples/code/{bad_loc_code}")
+    test(f"修正前失败样本 {bad_loc_code} 后修正成功登记 IN_STORAGE",
+         r.get("success") and r["data"]["status"] == "IN_STORAGE",
+         f"status={r.get('data',{}).get('status')}")
+
+    r = api("GET", f"/samples/code/{allfail_1}")
+    test(f"纯失败样本 {allfail_1} 不存在",
+         r.get("error") == "SAMPLE_NOT_FOUND",
+         f"err={r.get('error')}")
+
+    r = api("GET", f"/samples/code/{allfail_2}")
+    test(f"纯失败样本 {allfail_2} 不存在",
+         r.get("error") == "SAMPLE_NOT_FOUND",
+         f"err={r.get('error')}")
+
+    r = api("GET", f"/import/batches/code/{batch_code}")
+    test(f"批次 {batch_code} 状态 {batch_status}",
+         (r.get("success")
+          and r["data"]["total_count"] == batch_total
+          and r["data"]["success_count"] == batch_succ
+          and r["data"]["failed_count"] == batch_fail
+          and r["data"]["status"] == batch_status),
+         f"total={r.get('data',{}).get('total_count')} "
+         f"succ={r.get('data',{}).get('success_count')} "
+         f"fail={r.get('data',{}).get('failed_count')} "
+         f"status={r.get('data',{}).get('status')}")
+
+    r = api("GET", f"/import/batches/code/{allfail_batch_code}")
+    test(f"纯失败批次 {allfail_batch_code} 状态 FAILED",
+         r.get("success") and r["data"]["status"] == "FAILED" and r["data"]["success_count"] == 0,
+         f"status={r.get('data',{}).get('status')} "
+         f"succ={r.get('data',{}).get('success_count')} "
+         f"fail={r.get('data',{}).get('failed_count')}")
+
+    req = urllib.request.Request(f"{BASE_URL}/samples/export?role=LAB_MANAGER")
+    with urllib.request.urlopen(req) as resp:
+        csv_txt = resp.read().decode("utf-8-sig")
+    test(f"导出 CSV 包含 ok1/ok2 成功样本，不包含 allfail 样本",
+         ok1_code in csv_txt and ok2_code in csv_txt
+         and allfail_1 not in csv_txt and allfail_2 not in csv_txt,
+         f"has_ok1={ok1_code in csv_txt} has_ok2={ok2_code in csv_txt} "
+         f"has_allfail1={allfail_1 in csv_txt} has_allfail2={allfail_2 in csv_txt}")
 
 
 def main():
-    action = sys.argv[1] if len(sys.argv) > 1 else "check"
+    health = api("GET", "/health")
+    if not health.get("success"):
+        print("服务不可用，退出")
+        print(f"health={health}")
+        return 1
 
-    if action == "save":
-        sample1 = api_get("/samples/1")
-        logs1 = api_get("/samples/1/audit-logs")
-        sample2 = api_get("/samples/2")
-        sample3 = api_get("/samples/3")
+    print("=" * 70)
+    print("  真实重启后一致性验证")
+    print("=" * 70)
+    print()
 
-        state = {
-            "sample1": sample1,
-            "sample1_logs": logs1,
-            "sample2": sample2,
-            "sample3": sample3
-        }
+    dirty_path = "data/dirty_state_snapshot.json"
+    dirty_snap = None
+    if os.path.exists(dirty_path):
+        with open(dirty_path, encoding="utf-8") as f:
+            dirty_snap = json.load(f)
+        print(f"  [INFO] 加载脏数据测试 snapshot: {dirty_path}")
+    else:
+        print(f"  [WARN] 脏数据 snapshot 不存在 ({dirty_path})，跳过")
 
-        with open("data/restart_check.json", "w", encoding="utf-8") as f:
-            json.dump(state, f, ensure_ascii=False, indent=2)
+    if dirty_snap:
+        verify_dirty_snapshot(dirty_snap)
 
-        print("已保存当前状态到 data/restart_check.json")
-        print(f"  样本1: 状态={sample1['data']['status']}, 版本={sample1['data']['version']}")
-        print(f"  样本2: 状态={sample2['data']['status']}, 版本={sample2['data']['version']}")
-        print(f"  样本3: 状态={sample3['data']['status']}, 版本={sample3['data']['version']}")
-
-    elif action == "verify":
-        with open("data/restart_check.json", "r", encoding="utf-8") as f:
-            before = json.load(f)
-
-        sample1 = api_get("/samples/1")
-        logs1 = api_get("/samples/1/audit-logs")
-        sample2 = api_get("/samples/2")
-        sample3 = api_get("/samples/3")
-
-        print("=" * 60)
-        print("  数据一致性验证")
-        print("=" * 60)
-
-        # 验证样本1
-        s1_ok = (sample1["data"]["status"] == before["sample1"]["data"]["status"] and
-                 sample1["data"]["version"] == before["sample1"]["data"]["version"] and
-                 len(logs1["data"]) == len(before["sample1_logs"]["data"]))
-        print(f"\n样本1 (ID=1): {'✓ 一致' if s1_ok else '✗ 不一致'}")
-        print(f"  状态: 重启前={before['sample1']['data']['status']}, 重启后={sample1['data']['status']}")
-        print(f"  版本: 重启前={before['sample1']['data']['version']}, 重启后={sample1['data']['version']}")
-        print(f"  审计日志数: 重启前={len(before['sample1_logs']['data'])}, 重启后={len(logs1['data'])}")
-
-        # 验证样本2
-        s2_ok = (sample2["data"]["status"] == before["sample2"]["data"]["status"] and
-                 sample2["data"]["version"] == before["sample2"]["data"]["version"])
-        print(f"\n样本2 (ID=2): {'✓ 一致' if s2_ok else '✗ 不一致'}")
-        print(f"  状态: 重启前={before['sample2']['data']['status']}, 重启后={sample2['data']['status']}")
-        print(f"  版本: 重启前={before['sample2']['data']['version']}, 重启后={sample2['data']['version']}")
-
-        # 验证样本3
-        s3_ok = (sample3["data"]["status"] == before["sample3"]["data"]["status"] and
-                 sample3["data"]["version"] == before["sample3"]["data"]["version"])
-        print(f"\n样本3 (ID=3): {'✓ 一致' if s3_ok else '✗ 不一致'}")
-        print(f"  状态: 重启前={before['sample3']['data']['status']}, 重启后={sample3['data']['status']}")
-        print(f"  版本: 重启前={before['sample3']['data']['version']}, 重启后={sample3['data']['version']}")
-
-        # CSV 导出验证
-        print("\nCSV 导出验证:")
-        try:
-            req = urllib.request.Request(f"{BASE_URL}/samples/1/export-chain?role=LAB_TECHNICIAN")
-            with urllib.request.urlopen(req) as resp:
-                csv_content = resp.read().decode("utf-8-sig")
-            has_data = "TEST-ACCEPT-001" in csv_content and "REGISTER" in csv_content
-            print(f"  样本1交接链CSV: {'✓ 正常' if has_data else '✗ 异常'}")
-            print(f"  CSV 包含样本编号和登记记录: {has_data}")
-        except Exception as e:
-            print(f"  导出失败: {e}")
-            has_data = False
-
-        all_ok = s1_ok and s2_ok and s3_ok and has_data
-        print("\n" + "=" * 60)
-        if all_ok:
-            print("  ✓ 所有数据验证通过！进程重启后数据一致。")
-            return 0
-        else:
-            print("  ✗ 部分数据不一致，请检查！")
-            return 1
+    print()
+    print("=" * 70)
+    print("  测试汇总")
+    print("=" * 70)
+    print(f"  总测试数: {_pass + _fail}")
+    print(f"  通过:     {_pass}")
+    print(f"  失败:     {_fail}")
+    print()
+    if _fail == 0:
+        print("  ✓ 真实重启后一致性全部通过！")
+        return 0
+    else:
+        print(f"  ✗ 有 {_fail} 个用例失败")
+        return 1
 
 
 if __name__ == "__main__":

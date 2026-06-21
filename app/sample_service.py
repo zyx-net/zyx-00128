@@ -123,7 +123,8 @@ class SampleService:
         operator: str,
         operator_role: str,
         sample_type: Optional[str] = None,
-        remark: Optional[str] = None
+        remark: Optional[str] = None,
+        _no_commit: bool = False
     ) -> Sample:
         self._check_permission(operator_role, "sample.register", "登记样本")
 
@@ -177,7 +178,7 @@ class SampleService:
             to_location_id=None
         )
 
-        db.session.commit()
+        db.session.commit() if not _no_commit else None
         return sample
 
     def store_in(
@@ -187,7 +188,8 @@ class SampleService:
         operator: str,
         operator_role: str,
         expected_version: int,
-        reason: Optional[str] = None
+        reason: Optional[str] = None,
+        _no_commit: bool = False
     ) -> Sample:
         self._check_permission(operator_role, "sample.store_in", "入库")
 
@@ -257,7 +259,7 @@ class SampleService:
             to_location_id=location_id
         )
 
-        db.session.commit()
+        db.session.commit() if not _no_commit else None
         return sample
 
     def transfer(
@@ -267,7 +269,8 @@ class SampleService:
         operator: str,
         operator_role: str,
         expected_version: int,
-        reason: Optional[str] = None
+        reason: Optional[str] = None,
+        _no_commit: bool = False
     ) -> Sample:
         self._check_permission(operator_role, "sample.transfer", "转移")
 
@@ -340,7 +343,7 @@ class SampleService:
             to_location_id=to_location_id
         )
 
-        db.session.commit()
+        db.session.commit() if not _no_commit else None
         return sample
 
     def borrow(
@@ -350,7 +353,8 @@ class SampleService:
         operator_role: str,
         expected_version: int,
         reason: Optional[str] = None,
-        remark: Optional[str] = None
+        remark: Optional[str] = None,
+        _no_commit: bool = False
     ) -> Sample:
         self._check_permission(operator_role, "sample.borrow", "借出")
 
@@ -399,7 +403,7 @@ class SampleService:
             to_location_id=None
         )
 
-        db.session.commit()
+        db.session.commit() if not _no_commit else None
         return sample
 
     def return_sample(
@@ -410,7 +414,8 @@ class SampleService:
         operator_role: str,
         expected_version: int,
         reason: Optional[str] = None,
-        remark: Optional[str] = None
+        remark: Optional[str] = None,
+        _no_commit: bool = False
     ) -> Sample:
         self._check_permission(operator_role, "sample.return", "退回")
 
@@ -480,7 +485,7 @@ class SampleService:
             to_location_id=location_id
         )
 
-        db.session.commit()
+        db.session.commit() if not _no_commit else None
         return sample
 
     def discard(
@@ -490,7 +495,8 @@ class SampleService:
         operator_role: str,
         expected_version: int,
         reason: str,
-        remark: Optional[str] = None
+        remark: Optional[str] = None,
+        _no_commit: bool = False
     ) -> Sample:
         self._check_permission(operator_role, "sample.discard", "废弃")
 
@@ -532,7 +538,7 @@ class SampleService:
 
         self._invalidate_previous_undos(sample.id)
 
-        db.session.commit()
+        db.session.commit() if not _no_commit else None
         return sample
 
     def get_sample(self, sample_id: int, include_deleted: bool = True) -> Optional[Sample]:

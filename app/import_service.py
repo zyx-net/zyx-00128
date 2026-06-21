@@ -139,6 +139,7 @@ class ImportService:
         error_records = []
 
         for row in rows:
+            sp = db.session.begin_nested()
             line_num = row.get('__line__', 0)
             row_data = {k: v for k, v in row.items() if k != '__line__'}
             sample_code = row.get('sample_code', '').strip()
@@ -156,7 +157,24 @@ class ImportService:
 
                 existing = Sample.query.filter_by(sample_code=sample_code, is_deleted=False).first()
 
+                location_code = row.get('location_code', '').strip()
+                target_location = None
+                if location_code:
+                    target_location = Location.query.filter_by(code=location_code, is_active=True).first()
+                    if not target_location:
+                        raise SampleServiceError(f"库位不存在: {location_code}", "LOCATION_NOT_FOUND")
+
                 if existing:
+                    required_temp_zone = (row.get('required_temp_zone', '').strip()
+                                          or existing.required_temp_zone)
+                    if target_location and target_location.temp_zone != required_temp_zone:
+                        temp_zone_info = self.config.get_temp_zone(required_temp_zone)
+                        location_temp_info = self.config.get_temp_zone(target_location.temp_zone)
+                        raise SampleServiceError(
+                            f"温区不匹配：样本需要 {temp_zone_info['name']}，但库位 '{target_location.name}' 属于 {location_temp_info['name']}",
+                            "TEMP_ZONE_MISMATCH"
+                        )
+
                     if import_mode == 'REGISTER':
                         if strategy == 'FAIL_ON_DUPLICATE':
                             raise SampleServiceError(
@@ -180,14 +198,17 @@ class ImportService:
                                 retryable=retryable
                             )
                             db.session.add(import_record)
+                            sp.commit()
                             continue
                         elif strategy == 'UPDATE_IF_EXISTS':
                             action_taken = 'UPDATE'
-                            sample = self._update_existing_sample(existing, row, operator, operator_role)
+                            sample = self._update_existing_sample(existing, row, operator, operator_role,
+                                                                   prechecked_location=target_location)
                             sample_id = sample.id
                     elif import_mode == 'UPDATE_ONLY':
                         action_taken = 'UPDATE'
-                        sample = self._update_existing_sample(existing, row, operator, operator_role)
+                        sample = self._update_existing_sample(existing, row, operator, operator_role,
+                                                               prechecked_location=target_location)
                         sample_id = sample.id
                     elif import_mode == 'REGISTER_OR_UPDATE':
                         if strategy == 'FAIL_ON_DUPLICATE':
@@ -212,10 +233,12 @@ class ImportService:
                                 retryable=retryable
                             )
                             db.session.add(import_record)
+                            sp.commit()
                             continue
                         elif strategy == 'UPDATE_IF_EXISTS':
                             action_taken = 'UPDATE'
-                            sample = self._update_existing_sample(existing, row, operator, operator_role)
+                            sample = self._update_existing_sample(existing, row, operator, operator_role,
+                                                                   prechecked_location=target_location)
                             sample_id = sample.id
                 else:
                     if import_mode == 'UPDATE_ONLY':
@@ -224,40 +247,56 @@ class ImportService:
                             "SAMPLE_NOT_FOUND"
                         )
                     else:
+                        temp_zone = row.get('required_temp_zone', '').strip()
+                        if target_location and target_location.temp_zone != temp_zone:
+                            temp_zone_info = self.config.get_temp_zone(temp_zone)
+                            location_temp_info = self.config.get_temp_zone(target_location.temp_zone)
+                            raise SampleServiceError(
+                                f"温区不匹配：样本需要 {temp_zone_info['name']}，但库位 '{target_location.name}' 属于 {location_temp_info['name']}",
+                                "TEMP_ZONE_MISMATCH"
+                            )
+
                         action_taken = 'REGISTER'
                         sample_data = self._row_to_sample_data(row)
                         sample = self.sample_service.register_sample(
                             **sample_data,
                             operator=operator,
-                            operator_role=operator_role
+                            operator_role=operator_role,
+                            _no_commit=True
                         )
                         sample_id = sample.id
 
-                        location_code = row.get('location_code', '').strip()
-                        if location_code:
-                            loc = Location.query.filter_by(code=location_code, is_active=True).first()
-                            if not loc:
-                                raise SampleServiceError(f"库位不存在: {location_code}", "LOCATION_NOT_FOUND")
-                            if loc.temp_zone != sample.required_temp_zone:
-                                temp_zone_info = self.config.get_temp_zone(sample.required_temp_zone)
-                                location_temp_info = self.config.get_temp_zone(loc.temp_zone)
-                                raise SampleServiceError(
-                                    f"温区不匹配：样本需要 {temp_zone_info['name']}，但库位 '{loc.name}' 属于 {location_temp_info['name']}",
-                                    "TEMP_ZONE_MISMATCH"
-                                )
+                        if target_location is not None:
                             sample = self.sample_service.store_in(
                                 sample_id=sample.id,
-                                location_id=loc.id,
+                                location_id=target_location.id,
                                 operator=operator,
                                 operator_role=operator_role,
                                 expected_version=sample.version,
-                                reason='批量导入入库'
+                                reason='批量导入入库',
+                                _no_commit=True
                             )
                             action_taken = 'REGISTER+STORE_IN'
 
                 success_count += 1
 
+                import_record = ImportRecord(
+                    batch_id=batch.id,
+                    line_number=line_num,
+                    sample_code=sample_code,
+                    action=action_taken,
+                    result='SUCCESS',
+                    error_code=None,
+                    error_message=None,
+                    sample_id=sample_id,
+                    row_data=json.dumps(row_data, ensure_ascii=False),
+                    retryable=False
+                )
+                db.session.add(import_record)
+                sp.commit()
+
             except SampleServiceError as e:
+                sp.rollback()
                 result_status = 'FAILED'
                 failed_count += 1
                 error_code = e.code
@@ -271,6 +310,7 @@ class ImportService:
                     'row_data': row_data
                 })
             except Exception as e:
+                sp.rollback()
                 result_status = 'FAILED'
                 failed_count += 1
                 error_code = 'UNKNOWN_ERROR'
@@ -284,19 +324,20 @@ class ImportService:
                     'row_data': row_data
                 })
 
-            import_record = ImportRecord(
-                batch_id=batch.id,
-                line_number=line_num,
-                sample_code=sample_code,
-                action=action_taken,
-                result=result_status,
-                error_code=error_code,
-                error_message=error_message,
-                sample_id=sample_id,
-                row_data=json.dumps(row_data, ensure_ascii=False),
-                retryable=retryable
-            )
-            db.session.add(import_record)
+            if result_status == 'FAILED':
+                import_record = ImportRecord(
+                    batch_id=batch.id,
+                    line_number=line_num,
+                    sample_code=sample_code,
+                    action=action_taken,
+                    result=result_status,
+                    error_code=error_code,
+                    error_message=error_message,
+                    sample_id=None,
+                    row_data=json.dumps(row_data, ensure_ascii=False),
+                    retryable=retryable
+                )
+                db.session.add(import_record)
 
         error_csv_path = None
         if error_records:
@@ -305,7 +346,12 @@ class ImportService:
         batch.success_count = success_count
         batch.failed_count = failed_count
         batch.skipped_count = skipped_count
-        batch.status = 'COMPLETED' if failed_count == 0 else 'COMPLETED_WITH_ERRORS'
+        if failed_count == 0:
+            batch.status = 'COMPLETED'
+        elif success_count == 0:
+            batch.status = 'FAILED'
+        else:
+            batch.status = 'PARTIAL_FAILED'
         batch.finished_at = datetime.utcnow()
         batch.error_csv_path = error_csv_path
 
@@ -317,7 +363,8 @@ class ImportService:
         existing: Sample,
         row: Dict[str, Any],
         operator: str,
-        operator_role: str
+        operator_role: str,
+        prechecked_location: Optional[Location] = None
     ) -> Sample:
         version_str = row.get('version', '').strip()
         if self.config.require_version_on_update() and version_str:
@@ -373,38 +420,34 @@ class ImportService:
                 version=new_version
             )
 
-        if location_code:
-            loc = Location.query.filter_by(code=location_code, is_active=True).first()
-            if not loc:
-                raise SampleServiceError(f"库位不存在: {location_code}", "LOCATION_NOT_FOUND")
-            if loc.temp_zone != existing.required_temp_zone:
-                temp_zone_info = self.config.get_temp_zone(existing.required_temp_zone)
-                location_temp_info = self.config.get_temp_zone(loc.temp_zone)
-                raise SampleServiceError(
-                    f"温区不匹配：样本需要 {temp_zone_info['name']}，但库位 '{loc.name}' 属于 {location_temp_info['name']}",
-                    "TEMP_ZONE_MISMATCH"
-                )
+        if prechecked_location is not None:
+            location = prechecked_location
             if existing.status == 'REGISTERED':
                 return self.sample_service.store_in(
                     sample_id=existing.id,
-                    location_id=loc.id,
+                    location_id=location.id,
                     operator=operator,
                     operator_role=operator_role,
                     expected_version=new_version,
-                    reason='批量导入入库'
+                    reason='批量导入入库',
+                    _no_commit=True
                 )
-            elif existing.status == 'IN_STORAGE' and existing.location_id != loc.id:
+            elif existing.status == 'IN_STORAGE' and existing.location_id != location.id:
                 return self.sample_service.transfer(
                     sample_id=existing.id,
-                    to_location_id=loc.id,
+                    to_location_id=location.id,
                     operator=operator,
                     operator_role=operator_role,
                     expected_version=new_version,
-                    reason='批量导入转移'
+                    reason='批量导入转移',
+                    _no_commit=True
                 )
-
-        db.session.commit()
-        return existing
+            else:
+                db.session.flush()
+                return existing
+        else:
+            db.session.flush()
+            return existing
 
     def _is_retryable_error(self, error_code: str) -> bool:
         non_retryable = {

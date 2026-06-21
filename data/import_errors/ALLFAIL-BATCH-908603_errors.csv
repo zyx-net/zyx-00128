@@ -1,0 +1,3 @@
+﻿sample_code,name,sample_type,required_temp_zone,version,location_code,status,remark,error_code,error_message
+ALLFAIL-1-908603,,血液,REFRIGERATED,,REF-001,,,MISSING_REQUIRED_FIELD,样本 ALLFAIL-1-908603 缺少必填字段 name（样本名称）
+ALLFAIL-2-908603,测试,血液,INVALID_TZ,,REF-001,,,INVALID_TEMP_ZONE,样本 ALLFAIL-2-908603 温区无效: INVALID_TZ

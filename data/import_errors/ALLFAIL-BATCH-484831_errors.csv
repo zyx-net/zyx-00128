@@ -1,0 +1,2 @@
+﻿sample_code,name,sample_type,required_temp_zone,version,location_code,status,remark,error_code,error_message
+ALLFAIL-1-484831,,血液,REFRIGERATED,,REF-001,,,MISSING_REQUIRED_FIELD,样本 ALLFAIL-1-484831 缺少必填字段 name（样本名称）
